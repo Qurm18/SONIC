@@ -8,26 +8,52 @@ export interface EQBand {
 }
 
 export const DEFAULT_BANDS: EQBand[] = [
-  { frequency: 32, type: 'lowshelf', gain: 0, q: 0.7 },
-  { frequency: 64, type: 'peaking', gain: 0, q: 1.4 },
-  { frequency: 125, type: 'peaking', gain: 0, q: 1.4 },
-  { frequency: 250, type: 'peaking', gain: 0, q: 1.4 },
-  { frequency: 500, type: 'peaking', gain: 0, q: 1.4 },
-  { frequency: 1000, type: 'peaking', gain: 0, q: 1.4 },
-  { frequency: 2000, type: 'peaking', gain: 0, q: 1.4 },
-  { frequency: 4000, type: 'peaking', gain: 0, q: 1.4 },
-  { frequency: 8000, type: 'peaking', gain: 0, q: 1.4 },
-  { frequency: 16000, type: 'highshelf', gain: 0, q: 0.7 },
+  { frequency: 32,    type: 'lowshelf', gain: 0, q: 0.7 },
+  { frequency: 64,    type: 'peaking',  gain: 0, q: 1.4 },
+  { frequency: 125,   type: 'peaking',  gain: 0, q: 1.4 },
+  { frequency: 250,   type: 'peaking',  gain: 0, q: 1.4 },
+  { frequency: 500,   type: 'peaking',  gain: 0, q: 1.4 },
+  { frequency: 1000,  type: 'peaking',  gain: 0, q: 1.4 },
+  { frequency: 2000,  type: 'peaking',  gain: 0, q: 1.4 },
+  { frequency: 4000,  type: 'peaking',  gain: 0, q: 1.4 },
+  { frequency: 8000,  type: 'peaking',  gain: 0, q: 1.4 },
+  { frequency: 16000, type: 'highshelf',gain: 0, q: 0.7 },
 ];
+
+// A/B preview gains per TuningWizard scenario — index matches SCENARIOS in TuningWizard.tsx
+export const AB_PREVIEW_GAINS: Record<string, { A: number[]; B: number[] }> = {
+  bass_depth:      { A: [10, 8,  4,  0,  0,  0,  0,  0,  0,  0], B: [2, 10,  2,  0,  0,  0,  0,  0,  0, 0] },
+  vocal_clarity:   { A: [0,  0,  0,  4,  8,  4,  0,  0,  0,  0], B: [0,  0,  0,  0,  2,  8, 10,  4,  0, 0] },
+  sub_bass:        { A: [12, 6,  0,  0,  0,  0,  0,  0,  0,  0], B: [-2, 4,  2,  0,  0,  0,  0,  0,  0, 0] },
+  instrument_sep:  { A: [0,  0,  0, -2, -2,  2,  4,  6,  4,  2], B: [0,  0,  2,  4,  6,  4,  2,  0, -2, 0] },
+  mid_punch:       { A: [0,  2,  6,  5,  2,  0,  0,  0,  0,  0], B: [0,  0, -2, -3,  4,  2,  0,  0,  0, 0] },
+  high_frequency:  { A: [0,  0,  0,  0,  0,  0, -1, -2, -4, -6], B: [0,  0,  0,  0,  0,  0,  2,  6, 10, 8] },
+  presence:        { A: [0,  0,  0,  0,  0, -2, -3, -2,  0,  0], B: [0,  0,  0,  0,  0,  2,  5,  4,  2, 0] },
+  warmth_body:     { A: [0,  0,  2,  5,  5,  3,  0,  0,  0,  0], B: [0,  0,  0, -2, -2,  0,  0,  0,  0, 0] },
+  sibilance:       { A: [0,  0,  0,  0,  0,  0, -2, -5, -7, -4], B: [0,  0,  0,  0,  0,  0,  0,  3,  5, 4] },
+  overall_balance: { A: [8,  4,  0, -3, -5, -3,  0,  4,  8,  6], B: [0,  0,  0,  0,  0,  0,  0,  0,  0, 0] },
+};
 
 export class AudioEngine {
   private context: AudioContext | null = null;
   private source: MediaElementAudioSourceNode | null = null;
-  private filters: BiquadFilterNode[] = [];
+
+  // Chain A = preview candidate; Chain B = live/current EQ
+  private filtersA: BiquadFilterNode[] = [];
+  private filtersB: BiquadFilterNode[] = [];
+  private gainA: GainNode | null = null;
+  private gainB: GainNode | null = null;
+
+  // Shared
   private analyzer: AnalyserNode | null = null;
   private preGain: GainNode | null = null;
   private masterGain: GainNode | null = null;
   private compressor: DynamicsCompressorNode | null = null;
+
+  // State
+  private activeChain: 'A' | 'B' | 'none' = 'none';
+  private isABMode = false;
+  private CROSSFADE_TIME = 0.12; // seconds
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -37,25 +63,16 @@ export class AudioEngine {
 
   public async initialize(audioElement: HTMLAudioElement) {
     if (!this.context) return;
-    
-    // Explicitly resume context (it might be suspended by the browser)
-    if (this.context.state === 'suspended') {
-      await this.context.resume();
-    }
+    if (this.context.state === 'suspended') await this.context.resume();
 
-    // Connect source if not connected
     if (!this.source) {
-      try {
-        this.source = this.context.createMediaElementSource(audioElement);
-      } catch (err) {
-        // Source already connected to this or another element
-        console.warn("Audio source connection warning:", err);
-      }
+      try { this.source = this.context.createMediaElementSource(audioElement); }
+      catch (err) { console.warn('Audio source warning:', err); }
     }
 
     if (!this.analyzer) {
       this.analyzer = this.context.createAnalyser();
-      this.analyzer.fftSize = 512; // High resolution
+      this.analyzer.fftSize = 512;
       this.analyzer.smoothingTimeConstant = 0.85;
     }
 
@@ -68,143 +85,160 @@ export class AudioEngine {
       this.compressor.release.setValueAtTime(0.25, this.context.currentTime);
     }
 
-    if (!this.preGain) {
-      this.preGain = this.context.createGain();
-      this.preGain.gain.value = 1.0;
-    }
+    if (!this.preGain) { this.preGain = this.context.createGain(); this.preGain.gain.value = 1.0; }
+    if (!this.masterGain) { this.masterGain = this.context.createGain(); this.masterGain.gain.value = 0.8; }
 
-    if (!this.masterGain) {
-      this.masterGain = this.context.createGain();
-      this.masterGain.gain.value = 0.8;
-    }
+    if (this.filtersA.length === 0) {
+      this.filtersA = this._buildFilterChain();
+      this.filtersB = this._buildFilterChain();
 
-    // Initialize/Connect filters
-    if (this.filters.length === 0) {
-      this.filters = DEFAULT_BANDS.map((band) => {
-        const filter = this.context!.createBiquadFilter();
-        filter.type = band.type;
-        filter.frequency.value = band.frequency;
-        filter.gain.value = band.gain;
-        filter.Q.value = band.q;
-        return filter;
-      });
+      this.gainA = this.context.createGain();
+      this.gainB = this.context.createGain();
+      this.gainA.gain.value = 0; // silent — A is preview only
+      this.gainB.gain.value = 1; // B is always live
 
-      // Chain: Source -> PreGain -> Filters -> Compressor -> MasterGain -> Analyzer -> Destination
-      if (this.source && this.preGain && this.masterGain && this.analyzer && this.compressor) {
-        let lastNode: AudioNode = this.source;
-        
-        lastNode.connect(this.preGain);
-        lastNode = this.preGain;
+      // Topology: source -> preGain -+-> filtersA -> gainA -+-> compressor -> masterGain -> analyzer -> out
+      //                              +-> filtersB -> gainB -+
+      this._connectChain(this.preGain, this.filtersA, this.gainA);
+      this._connectChain(this.preGain, this.filtersB, this.gainB);
+      this.gainA.connect(this.compressor!);
+      this.gainB.connect(this.compressor!);
+      this.compressor!.connect(this.masterGain!);
+      this.masterGain!.connect(this.analyzer!);
+      this.analyzer!.connect(this.context.destination);
 
-        this.filters.forEach((filter) => {
-          lastNode.connect(filter);
-          lastNode = filter;
-        });
-
-        lastNode.connect(this.compressor);
-        this.compressor.connect(this.masterGain);
-        this.masterGain.connect(this.analyzer);
-        this.analyzer.connect(this.context.destination);
-      }
+      if (this.source) this.source.connect(this.preGain);
     }
   }
 
+  private _buildFilterChain(): BiquadFilterNode[] {
+    return DEFAULT_BANDS.map((band) => {
+      const f = this.context!.createBiquadFilter();
+      f.type = band.type;
+      f.frequency.value = band.frequency;
+      f.gain.value = band.gain;
+      f.Q.value = band.q;
+      return f;
+    });
+  }
+
+  private _connectChain(src: AudioNode, filters: BiquadFilterNode[], dest: AudioNode) {
+    let last: AudioNode = src;
+    for (const f of filters) { last.connect(f); last = f; }
+    last.connect(dest);
+  }
+
+  // ─── A/B API ──────────────────────────────────────────────────────────────
+
+  /** Pre-load gains into chain A without switching audio */
+  public loadPreviewGains(gains: number[]) {
+    gains.forEach((g, i) => this._setGainOnChain(this.filtersA, i, g));
+  }
+
+  /** Crossfade to chain A (preview) or B (current EQ) with smooth ramp */
+  public crossfadeTo(chain: 'A' | 'B') {
+    if (!this.context || !this.gainA || !this.gainB) return;
+    if (this.activeChain === chain) return;
+
+    this.isABMode = true;
+    this.activeChain = chain;
+
+    const now = this.context.currentTime;
+    const end = now + this.CROSSFADE_TIME;
+
+    const [fadeIn, fadeOut] = chain === 'A'
+      ? [this.gainA, this.gainB]
+      : [this.gainB, this.gainA];
+
+    fadeOut.gain.cancelScheduledValues(now);
+    fadeIn.gain.cancelScheduledValues(now);
+    fadeOut.gain.setValueAtTime(fadeOut.gain.value, now);
+    fadeIn.gain.setValueAtTime(fadeIn.gain.value, now);
+    fadeOut.gain.linearRampToValueAtTime(0, end);
+    fadeIn.gain.linearRampToValueAtTime(1, end);
+  }
+
+  /** Exit A/B mode — restore chain B immediately */
+  public exitABMode() {
+    if (!this.context || !this.gainA || !this.gainB) return;
+    this.isABMode = false;
+    this.activeChain = 'none';
+    const now = this.context.currentTime;
+    this.gainA.gain.cancelScheduledValues(now);
+    this.gainB.gain.cancelScheduledValues(now);
+    this.gainA.gain.setValueAtTime(0, now);
+    this.gainB.gain.setValueAtTime(1, now);
+  }
+
+  // ─── Live EQ (chain B) ───────────────────────────────────────────────────
+
+  public updateBandParams(index: number, params: Partial<EQBand>) {
+    const f = this.filtersB[index];
+    if (!f || !this.context) return;
+    if (params.type !== undefined) f.type = params.type;
+    if (params.frequency !== undefined) f.frequency.setTargetAtTime(params.frequency, this.context.currentTime, 0.01);
+    if (params.gain !== undefined) f.gain.setTargetAtTime(params.gain, this.context.currentTime, 0.01);
+    if (params.q !== undefined) f.Q.setTargetAtTime(params.q, this.context.currentTime, 0.01);
+  }
+
+  public updateBand(index: number, gain: number) { this.updateBandParams(index, { gain }); }
+
+  public applyAllBands(bands: EQBand[]) { bands.forEach((b, i) => this.updateBandParams(i, b)); }
+
+  private _setGainOnChain(chain: BiquadFilterNode[], index: number, gain: number) {
+    const f = chain[index];
+    if (f && this.context) f.gain.setTargetAtTime(gain, this.context.currentTime, 0.005);
+  }
+
+  // ─── Utility ─────────────────────────────────────────────────────────────
+
   public setPreAmp(dB: number) {
     if (this.preGain && this.context) {
-      const gain = Math.pow(10, dB / 20);
-      this.preGain.gain.setTargetAtTime(gain, this.context.currentTime, 0.01);
+      this.preGain.gain.setTargetAtTime(Math.pow(10, dB / 20), this.context.currentTime, 0.01);
     }
   }
 
   public async resume() {
-    if (this.context && this.context.state === 'suspended') {
-      await this.context.resume();
-    }
+    if (this.context?.state === 'suspended') await this.context.resume();
   }
+
+  public getAnalyzer() { return this.analyzer; }
+  public setMasterVolume(v: number) { if (this.masterGain) this.masterGain.gain.value = v; }
+  public isInABMode() { return this.isABMode; }
+  public getActiveChain() { return this.activeChain; }
 
   public async findCalibrationSegments(audioUrl: string): Promise<Record<string, number>> {
     try {
-      const response = await fetch(audioUrl);
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await this.context!.decodeAudioData(arrayBuffer);
-      
-      const duration = audioBuffer.duration;
-      const sampleRate = audioBuffer.sampleRate;
-      const channelData = audioBuffer.getChannelData(0); // Use first channel for analysis
-      
-      // Analysis parameters
-      const windowSize = Math.floor(sampleRate * 0.5); // 500ms windows
-      const step = Math.floor(sampleRate * 1.0); // 1s steps
-      
-      const results: Record<string, number> = {};
-      
-      // Helper to find peak in a filtered range (simplified RMS-like approach)
-      const scanTrack = (filterCallback: (val: number, i: number) => number) => {
-        let maxEnergy = -1;
-        let bestTime = duration * 0.2; // Default to 20% in
-        
-        for (let i = 0; i < channelData.length - windowSize; i += step) {
-          let energy = 0;
-          for (let j = 0; j < windowSize; j++) {
-            const val = filterCallback(channelData[i + j], i + j);
-            energy += val * val;
-          }
-          if (energy > maxEnergy) {
-            maxEnergy = energy;
-            bestTime = i / sampleRate;
-          }
+      const buf = await fetch(audioUrl).then(r => r.arrayBuffer());
+      const audio = await this.context!.decodeAudioData(buf);
+      const dur = audio.duration;
+      const sr = audio.sampleRate;
+      const ch = audio.getChannelData(0);
+      const ws = Math.floor(sr * 0.5);
+      const step = Math.floor(sr * 1.0);
+
+      const scan = (fn: (v: number) => number) => {
+        let max = -1, best = dur * 0.2;
+        for (let i = 0; i < ch.length - ws; i += step) {
+          let e = 0;
+          for (let j = 0; j < ws; j++) { const v = fn(ch[i + j]); e += v * v; }
+          if (e > max) { max = e; best = i / sr; }
         }
-        return bestTime;
+        return best;
       };
 
-      // Heuristic "Neural" Scene Detection
-      results['bass_depth'] = scanTrack((v) => v); // Overall energy peak (usually hook)
-      results['sub_bass'] = scanTrack((v) => v); 
-      results['vocal_clarity'] = duration * 0.15; // Usually intro/verse
-      results['instrument_sep'] = duration * 0.45;
-      results['mid_punch'] = scanTrack((v) => Math.abs(v) > 0.5 ? v : 0); // High transient sections
-      results['high_frequency'] = scanTrack((v) => v); 
-      results['presence'] = duration * 0.75;
-      results['warmth_body'] = duration * 0.85;
-      results['sibilance'] = duration * 0.20;
-      results['overall_balance'] = duration * 0.50;
-
-      return results;
-    } catch (e) {
-      console.warn("Scene analysis failed, using defaults", e);
       return {
-        'bass_depth': 15,
-        'vocal_clarity': 30,
-        'high_frequency': 45
+        bass_depth: scan(v => v), sub_bass: scan(v => v),
+        vocal_clarity: dur * 0.15, instrument_sep: dur * 0.45,
+        mid_punch: scan(v => Math.abs(v) > 0.5 ? v : 0),
+        high_frequency: scan(v => v), presence: dur * 0.75,
+        warmth_body: dur * 0.85, sibilance: dur * 0.20, overall_balance: dur * 0.50,
       };
+    } catch (e) {
+      console.warn('Scene analysis failed', e);
+      return { bass_depth: 15, vocal_clarity: 30, high_frequency: 45 };
     }
   }
 
-  public updateBandParams(index: number, params: Partial<EQBand>) {
-    if (this.filters[index]) {
-      const filter = this.filters[index];
-      if (params.type !== undefined) filter.type = params.type;
-      if (params.frequency !== undefined) filter.frequency.setTargetAtTime(params.frequency, this.context!.currentTime, 0.01);
-      if (params.gain !== undefined) filter.gain.setTargetAtTime(params.gain, this.context!.currentTime, 0.01);
-      if (params.q !== undefined) filter.Q.setTargetAtTime(params.q, this.context!.currentTime, 0.01);
-    }
-  }
-
-  public updateBand(index: number, gain: number) {
-    this.updateBandParams(index, { gain });
-  }
-
-  public getAnalyzer() {
-    return this.analyzer;
-  }
-
-  public setMasterVolume(value: number) {
-    if (this.masterGain) {
-      this.masterGain.gain.value = value;
-    }
-  }
-
-  public close() {
-    this.context?.close();
-  }
+  public close() { this.context?.close(); }
 }

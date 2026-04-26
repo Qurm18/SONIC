@@ -9,7 +9,7 @@ import {
   ArrowRight, RotateCcw, Save, FolderOpen,
   Undo2, Redo2, Upload, X, ChevronDown
 } from 'lucide-react';
-import { AudioEngine, DEFAULT_BANDS, EQBand } from '@/lib/audio-engine';
+import { AudioEngine, DEFAULT_BANDS, EQBand, AB_PREVIEW_GAINS } from '@/lib/audio-engine';
 import { Visualizer } from '@/components/Visualizer';
 import { EQPanel } from '@/components/EQPanel';
 import { EQCurve } from '@/components/EQCurve';
@@ -179,47 +179,36 @@ export default function Home() {
 
   const loopTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const handlePreview = (type: 'warm' | 'bright', stepIndex?: number, seekTime?: number) => {
+  /**
+   * Real A/B crossfade preview:
+   * 1. Auto-play if paused
+   * 2. Seek to the calibration segment for this scenario
+   * 3. Load gains into chain A (preview)
+   * 4. Crossfade from B (current) → A (preview) or vice-versa
+   */
+  const handlePreviewAB = (scenarioId: string, branch: 'A' | 'B', seekTime?: number) => {
     if (!engineRef.current || !audioRef.current) return;
-    
-    // Auto-play if not playing
-    if (audioRef.current.paused) {
-      togglePlayback();
-    }
 
-    // Smart seek if a segment was found
+    // Start playback if needed
+    if (audioRef.current.paused) togglePlayback();
+
+    // Seek to the best segment for this scenario
     if (seekTime !== undefined) {
       audioRef.current.currentTime = seekTime;
     } else if (audioRef.current.currentTime > 120) {
-      audioRef.current.currentTime = 30; // Jump to early middle if too far
-    }
-    
-    // Default flat-ish starting point for preview
-    let previewGains = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    
-    switch(stepIndex) {
-      case 0: // Bass Depth
-        previewGains = type === 'warm' ? [10, 8, 4, 0, 0, 0, 0, 0, 0, 0] : [2, 10, 2, 0, 0, 0, 0, 0, 0, 0];
-        break;
-      case 1: // Vocal Clarity
-        previewGains = type === 'warm' ? [0, 0, 0, 4, 8, 4, 0, 0, 0, 0] : [0, 0, 0, 0, 2, 8, 10, 4, 0, 0];
-        break;
-      case 2: // Instrument Separation
-        previewGains = type === 'warm' ? [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] : [-2, -2, -2, 2, 4, 6, 8, 10, 8, 6];
-        break;
-      case 3: // Detail
-        previewGains = type === 'warm' ? [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] : [0, 0, 0, 0, 0, 0, 4, 8, 12, 10];
-        break;
-      case 4: // Final Balance
-        previewGains = type === 'warm' ? [8, 4, 0, -2, -4, -2, 0, 4, 8, 6] : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-        break;
-      default:
-        previewGains = type === 'warm' ? [6, 4, 2, 0, 0, 0, 0, 0, 0, 0] : [0, 0, 0, 0, 0, 0, 2, 4, 6, 4];
+      audioRef.current.currentTime = 30;
     }
 
-    previewGains.forEach((gain, i) => {
-      engineRef.current?.updateBand(i, gain);
-    });
+    // Load the correct gains for branch A into the preview chain
+    const gains = AB_PREVIEW_GAINS[scenarioId];
+    if (gains) {
+      engineRef.current.loadPreviewGains(gains[branch]);
+      engineRef.current.crossfadeTo('A'); // A chain always holds the preview gains
+    }
+  };
+
+  const handleExitAB = () => {
+    engineRef.current?.exitABMode();
   };
 
   const [aiInsights, setAiInsights] = useState<string[]>([]);
@@ -386,7 +375,8 @@ export default function Home() {
   };
 
   const restoreBands = () => {
-    // Restore the physical filters to match the UI State
+    // Exit A/B preview mode and restore the live EQ chain to UI state
+    engineRef.current?.exitABMode();
     bands.forEach((band, i) => {
         engineRef.current?.updateBand(i, band.gain);
     });
@@ -767,7 +757,8 @@ export default function Home() {
             <TuningWizard 
               onComplete={handleTuningComplete} 
               onClose={restoreBands}
-              onPreview={handlePreview}
+              onPreviewAB={handlePreviewAB}
+              onExitAB={handleExitAB}
             />
           )}
         </AnimatePresence>
