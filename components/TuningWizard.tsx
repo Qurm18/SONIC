@@ -6,7 +6,7 @@ import { Sparkles, ArrowRight, Check, Music } from 'lucide-react';
 import { analyzePreferences, TuningPreference } from '@/lib/ai-engine';
 
 interface TuningWizardProps {
-  onComplete: (result: { gains: number[], profileName: string, insights: string[] }) => void;
+  onComplete: (result: { gains: number[], profileName: string, insights: string[], profile?: import('@/lib/ai-engine').EQProfile }) => void;
   onClose: () => void;
   onPreview: (scenario: 'warm' | 'bright', stepIndex: number, seekTime?: number) => void;
 }
